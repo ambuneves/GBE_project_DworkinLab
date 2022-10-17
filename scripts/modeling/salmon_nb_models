@@ -1,0 +1,215 @@
+# This script models each gene using a negative binomial (nb) model with normalization factors as offsets, 
+# and returns p vlaues for each coefficient
+
+library(tximport)
+library(readr)
+library("RColorBrewer")
+library(stringr)
+library(edgeR)
+library(limma)
+library(lme4)
+library(glmmTMB)
+library(emmeans)
+library(parallel)
+library(car)
+library(TxDb.Dmelanogaster.UCSC.dm6.ensGene)
+library(effects)
+library(DESeq2)
+
+# local wd
+#setwd("/Users/amandan/Desktop/Dworkin/background_effects/data/")
+# CC working directory
+#setwd("/home/abneves/projects/def-idworkin/arteen/GBE/data")
+
+# Import salmon counts
+quant_files <- file.path("quants", list.files("quants"), "quant.sf")
+quant_files <- quant_files[ -c(14:20, 35:41) ]
+file.exists(quant_files)
+
+samples <- c("ORE_sd1_r1_GTGGCC_L002_quant",
+             "ORE_sd1_r2_TTAGGC_L003_quant",
+             "ORE_sdE3_r1_GTGGCC_L004_quant",
+             "ORE_sdE3_r2_TGACCA_L005_quant",
+             "ORE_sdETX4_r1_ATCACG_L003_quant",
+             "ORE_sdETX4_r2_GTTTCG_L004_quant",
+             "ORE_vg1_r1_TGACCA_L007_quant",
+             "ORE_vg1_r2_TTAGGC_L001_quant",
+             "ORE_vg213_r1_AGTCAA_L006_quant",
+             "ORE_vg213_r2_CGATGT_L007_quant",
+             "ORE_vg2a33_r1_CGATGT_L005_quant",
+             "ORE_vg2a33_r2_AGTTCC_L006_quant",
+             "ORE_w_r1_ATCACG_L001_quant",
+             "ORE_w_r2_GTTTCG_L002_quant",
+             "SAM_sd1_r1_CGTACG_L004_quant",
+             "SAM_sd1_r2_GCCAAT_L005_quant",
+             "SAM_sdE3_r1_ATGTCA_L006_quant",
+             "SAM_sdE3_r2_GCCAAT_L007_quant",
+             "SAM_sdETX4_r1_ACAGTG_L005_quant",
+             "SAM_sdETX4_r2_CCGTCC_L006_quant",
+             "SAM_vg1_r1_CGTACG_L002_quant",
+             "SAM_vg1_r2_GATCAG_L003_quant",
+             "SAM_vg213_r1_ACTTGA_L001_quant",
+             "SAM_vg213_r2_GAGTGG_L002_quant",
+             "SAM_vg2a33_r1_ACAGTG_L007_quant",
+             "SAM_vg2a33_r2_GATCAG_L001_quant",
+             "SAM_w_r1_ACTTGA_L003_quant",
+             "SAM_w_r2_GAGTGG_L004_quant")
+
+
+names(quant_files) <- samples
+
+# collapse transcript level counts to gene-level counts 
+library(TxDb.Dmelanogaster.UCSC.dm6.ensGene)
+txdb <- TxDb.Dmelanogaster.UCSC.dm6.ensGene
+k <- keys(txdb, keytype = "TXNAME")
+tx2gene <- select(x = txdb, keys = k, "GENEID", "TXNAME")
+
+txi <- tximport(quant_files, type = "salmon", tx2gene = tx2gene)
+
+# this becomes useful later so that everything prior to this does not have to be run 
+# write.csv(txi$counts, file = "salmon_counts_raw_no_outlier.csv")
+
+# add in variables for model
+background <- c(rep("ORE", 14), rep("SAM", 14))
+
+background <- as.factor(background)
+background <- relevel(background, "ORE")
+
+mutation_type <- c( rep("sd", 6), rep("vg", 6),
+                    rep("w", 2), rep ("sd", 6),
+                    rep("vg", 6), rep("w", 2))
+
+mutation_type <- as.factor(mutation_type)
+mutation_type <- relevel(mutation_type, "w")
+
+
+
+lane <- str_sub(samples, - 10, - 1) 
+lane <- str_sub(lane, 1, 4)
+lane <- as.factor(lane)
+
+perturbation <- c(7.434782609, 7.434782609,
+                  3.541666667, 3.541666667,
+                  4.564102564, 4.564102564,
+                  1.733333333, 1.733333333,
+                  3.692307692, 3.692307692,
+                  5.846153846, 5.846153846,
+                  10, 10,
+                  9.708333333, 9.708333333,
+                  6.739130435, 6.739130435,
+                  8.275862069, 8.275862069,
+                  1.217391304, 1.217391304,
+                  3.695652174, 3.695652174,
+                  9.714285714, 9.714285714,
+                  10, 10)
+
+perturbation <- abs(perturbation - max(perturbation))
+
+rna.design <- data.frame(sample = samples,
+                         file = quant_files,
+                         background = background,
+                         mutation_type = mutation_type,
+                         perturbation = perturbation,
+                         lane = lane)
+
+
+design <- model.matrix(~ lane + background + perturbation + perturbation:background,
+                       data = rna.design) # set up the model matrix 
+
+# create a DGEList object from a table of counts, where rows = features and columns = samples
+
+dgeList <- DGEList(txi$counts)
+
+# filter low counts
+keep2 <- filterByExpr(dgeList, design)
+dgeList <- dgeList[keep2, ]
+
+# calculate scaling factors to convert library sizes into effective library sizes... we want the differences in expression of the normalized reads to be representative of true differences in expression.. normalize by library size here
+# dgeList <- calcNormFactors(dgeList)
+
+load.model <- formula(~ background + perturbation + background:perturbation)
+
+data.in <- DESeqDataSetFromTximport(txi,rna.design,
+                                    design=load.model)
+
+
+# set things up to parallelize the models
+nt <- min(parallel::detectCores(),5)
+
+target_genes <- rownames(dgeList$counts)
+
+# target_genes <- target_genes[1:5]
+
+# estimate the size factors 
+# these are "normalization" factors which are on the scale of the counts, and include library size information
+# NormalizationFacrots provide a gene x sample array because in some experiments, counts for each sample have varying dependence on covariates, in this case it makes sense to provide gene-specific factors for each sample rather than a single size factor... I don't think that this is the case for me? So I should use the size factors which is normalization but ech sample gets a number rather than each gene x sample 
+
+data.in <- estimateSizeFactors(data.in)
+normFactors <- normalizationFactors(data.in)
+#write.csv(normFactors, "salmon_nb_normfactors.csv")
+
+# set up the counts to be used in the model (untransformed)
+salmon_counts <- txi$counts
+
+
+tmb.neb.genes.check.outlier <- list()
+
+cpm.nbinom.genes.check <- list()
+
+
+# run model for each gene
+
+count <- 1
+Sys.time()
+
+for (g in target_genes) {
+  
+  count <- count + 1
+  if (count%%100 == 0){
+    print(count)
+    print(Sys.time())
+  }
+  
+  the_counts <- as.numeric(salmon_counts[g,])
+  the_counts <- round(the_counts, 0)
+  the_normFactors <- normFactors[g,]
+  
+  nbinom.model <- glmmTMB(the_counts ~ background + 
+                            perturbation + 
+                            background:perturbation + 
+                            (1 | lane),
+                          data = rna.design,
+                          offset = log(the_normFactors),
+                          family = nbinom2(),
+                          control = glmmTMBControl(parallel = nt))
+  
+  if (anyNA(as.vector(summary(nbinom.model)$coef$cond[,2:4])) == T) {
+    nbinom.model.reduced <- glmmTMB(the_counts ~ background +
+                                      perturbation +
+                                      background:perturbation,
+                                    data = rna.design,
+                                    offset = log(the_normFactors),
+                                    family = nbinom2(),
+                                    control = glmmTMBControl(parallel = nt))
+    cpm.nbinom.genes.check[[g]] <- list(summary(nbinom.model.reduced)$coef$cond, "Used Reduced Model")
+    
+  }
+  else {
+    cpm.nbinom.genes.check[[g]] <- list(summary(nbinom.model)$coef$cond, "Used Full Model")
+    
+    p.vals <- Anova(nbinom.model)
+    # background, perturbation, background:perturbation
+    p_values[[g]] <- p.vals$`Pr(>Chisq)`
+    
+  }
+  
+  
+}
+
+# compile everything into one dataframe 
+
+p_values <- do.call(rbind, p_values)
+
+colnames(p_values) <- c("background", "perturbation", "background:perturbation")
+
+save(p_values, file = "/home/abneves/scratch/abneves/outputs/anova_pvalues_star_nb.Rdata")
