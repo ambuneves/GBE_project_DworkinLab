@@ -7,3 +7,5 @@ RNA Seq Data comes from Chris Chandler and Anna Mammel (see [Chandler et al. 201
 Katie Pelletier modelled the semi-quantitative counts to get perturbation effects
 
 Arteen Torabi-Marashi and I developed initial versions of the linear models
+
+Amanda Neves ran final models and created all plots
