@@ -1,0 +1,66 @@
+###### Plotting a big PCA plot with scatter plot
+# using RNAseqQC
+
+library("RNAseqQC")
+library("DESeq2")
+library("ensembldb")
+library("dplyr")
+library("ggplot2")
+library("purrr")
+library("tidyr")
+library("tibble")
+library("magrittr")
+
+
+# Load in data
+sample_info <- read.csv("/Users/amandan/Desktop/Dworkin/background_effects/data/plot_sample_info.csv")
+
+# remove the outlier to match the counts data
+sample_info <- sample_info[-5,]
+
+salmon_counts <- read.csv("/Users/amandan/Desktop/Dworkin/background_effects/data/salmon_counts_raw_all.csv", row.names = 1)
+
+salmon_counts <- round(salmon_counts)
+
+# make it so that they match explicitly
+rownames(sample_info) <- colnames(salmon_counts)
+
+# make DESeqDataSet
+dds <- DESeqDataSetFromMatrix(countData = salmon_counts, colData = sample_info, design = ~ background + perturbation)
+
+# filter low count genes 
+dds <- filter_genes(dds, min_count = 5)
+
+# variance stabilizing
+vsd <- vst(dds)
+# check if it worked! Think so
+mean_sd_plot(vsd)
+
+options(ggplot2.continuous.colour="viridis")
+
+# plot individual PC plots 
+plot_pca(vsd, PC_x = 1, PC_y = 5, color_by = "perturbation", shape_by = "background", point_alpha = 1, point_rel_size = 4)
+
+ggsave("PC1_P5_plot.png", 
+       width = 8, 
+       height = 6, 
+       path = "/Users/amandan/Desktop/Dworkin/background_effects/outputs")
+
+# Plot scatter plot comparing PC1 through PC5
+plot_pca_scatters(vsd, n_PCs = 5, color_by = "perturbation", shape_by = "background", point_alpha = 1,show_var_exp = FALSE)
+
+ggsave("plot_PCA_scatter.png", 
+       width = 8, 
+       height = 6, 
+       path = "/Users/amandan/Desktop/Dworkin/background_effects/outputs")
+
+# Plot the variance explained because it does not seem correct when you include this in the scatter plot
+
+pca_df <- data.frame(PC = 1:10, 'Variance explained' = pca_Res$var_exp[1:10])
+
+ggplot(data = pca_df, aes(x = factor(PC), y = Variance.explained)) + geom_bar(stat = "Identity", fill = "grey") + theme_classic() + ylab("Variance Explained") + xlab("PC")
+
+ggsave("PCA_var-exp.png", 
+       width = 6, 
+       height = 4, 
+       path = "/Users/amandan/Desktop/Dworkin/background_effects/outputs")
